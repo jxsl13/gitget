@@ -29,7 +29,16 @@ var (
 	errNotGitUrl   = errors.New("not a git url, doe snot contain '.git'")
 )
 
-func GetFile(ctx context.Context, gitUrl string) ([]byte, error) {
+type GetOptions struct {
+	InsecureSkipTLS bool
+}
+
+func Get(ctx context.Context, gitUrl string, opts ...GetOptions) ([]byte, error) {
+	var opt GetOptions
+	if len(opts) > 0 {
+		opt = opts[0]
+	}
+
 	repoUrl, filePath, branch, err := splitRepoUrl(gitUrl)
 	if err != nil {
 
@@ -44,28 +53,34 @@ func GetFile(ctx context.Context, gitUrl string) ([]byte, error) {
 			return io.ReadAll(resp.Body)
 		}
 
+		data, ferr := readLocalFile(gitUrl)
+		if ferr != nil {
+			return nil, fmt.Errorf("%w: %v", err, ferr)
+		}
+
 		// unexpected error, might be a file
-		return readLocalFile(gitUrl)
+		return data, nil
 	}
 
 	fs := memfs.New()
 	storer := memory.NewStorage()
 
-	opts := &git.CloneOptions{
-		URL:           repoUrl,
-		SingleBranch:  true,
-		ReferenceName: plumbing.NewBranchReferenceName(branch),
-		Depth:         1,
+	o := &git.CloneOptions{
+		URL:             repoUrl,
+		SingleBranch:    true,
+		ReferenceName:   plumbing.NewBranchReferenceName(branch),
+		Depth:           1,
+		InsecureSkipTLS: opt.InsecureSkipTLS,
 	}
 
-	_, err = git.Clone(storer, fs, opts)
+	_, err = git.Clone(storer, fs, o)
 	if err != nil {
 		fmt.Println(err)
 	}
 
 	f, err := fs.Open(filePath)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("error in cloned git repository: %w: %v", err, filePath)
 	}
 	defer f.Close()
 	return io.ReadAll(f)
@@ -125,10 +140,12 @@ func splitRepoUrl(fullUrl string) (repoUrl, filePath, branch string, err error) 
 	}
 
 	if strings.Contains(u.Path, "@") {
-		branch, err = last(strings.Split(u.Path, "@"))
+		tokens := strings.Split(u.Path, "@")
+		branch, err = last(tokens)
 		if err != nil {
 			return "", "", "", err
 		}
+		u.Path = strings.Join(tokens[:len(tokens)-1], "@")
 	}
 
 	pathParts := strings.Split(u.Path, "/")
